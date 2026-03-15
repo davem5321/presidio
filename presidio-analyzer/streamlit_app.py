@@ -444,11 +444,16 @@ elif upload_mode == "Local folder" and "folder_path" in dir() and folder_path:
 if files_to_process:
     if upload_mode == "Local folder":
         st.info(f"Found **{len(files_to_process)}** supported files in `{folder_path}`")
-    if st.button("Analyze", type="primary"):
+    col_analyze, col_stop = st.columns([1, 1])
+    with col_analyze:
+        analyze_clicked = st.button("Analyze", type="primary")
+    with col_stop:
+        stop_pressed = st.button("Stop", type="secondary")
+
+    if analyze_clicked:
         all_records = []
         progress_bar = st.progress(0)
         status_text = st.empty()
-        stop_pressed = st.button("Stop", type="secondary")
         total = len(files_to_process)
         stopped = False
 
