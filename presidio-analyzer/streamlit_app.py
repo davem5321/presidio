@@ -170,16 +170,36 @@ def _extract_docx_text(file_bytes: bytes) -> str:
     return "\n".join(paragraph.text for paragraph in doc.paragraphs)
 
 
+MAX_CHUNK_SIZE = 900000  # Stay under spaCy's 1M char limit
+
+
 def analyze_text(text: str, language: str, entities: List[str], score_threshold: float, model_key: str = "") -> List[RecognizerResult]:
-    """Run Presidio Analyzer on text."""
+    """Run Presidio Analyzer on text, chunking if necessary."""
     analyzer = get_analyzer(model_key)
-    results = analyzer.analyze(
-        text=text,
-        language=language,
-        entities=entities if entities else None,
-        score_threshold=score_threshold,
-    )
-    return results
+    if len(text) <= MAX_CHUNK_SIZE:
+        return analyzer.analyze(
+            text=text,
+            language=language,
+            entities=entities if entities else None,
+            score_threshold=score_threshold,
+        )
+
+    # Chunk large texts
+    all_results = []
+    for start in range(0, len(text), MAX_CHUNK_SIZE):
+        chunk = text[start:start + MAX_CHUNK_SIZE]
+        chunk_results = analyzer.analyze(
+            text=chunk,
+            language=language,
+            entities=entities if entities else None,
+            score_threshold=score_threshold,
+        )
+        # Adjust offsets to match original text positions
+        for r in chunk_results:
+            r.start += start
+            r.end += start
+        all_results.extend(chunk_results)
+    return all_results
 
 
 def results_to_records(results: List[RecognizerResult], text: str) -> List[Dict[str, Any]]:
@@ -385,32 +405,35 @@ if files_to_process:
         for idx, (filename, file_bytes) in enumerate(files_to_process.items()):
             status_text.markdown(f"**Processing:** `{filename}` ({idx + 1}/{total})")
 
-            text = read_file_text(file_bytes, filename)
+            try:
+                text = read_file_text(file_bytes, filename)
 
-            if not text.strip():
-                st.warning(f"**{filename}** is empty, skipping.")
-                progress_bar.progress((idx + 1) / total)
-                continue
+                if not text.strip():
+                    st.warning(f"**{filename}** is empty, skipping.")
+                    progress_bar.progress((idx + 1) / total)
+                    continue
 
-            results = analyze_text(text, language, entities_list, score_threshold, st_model_key)
+                results = analyze_text(text, language, entities_list, score_threshold, st_model_key)
 
-            with st.expander(f"**{filename}** — {len(results)} PII entities found", expanded=(len(files_to_process) == 1)):
-                if results:
-                    # Highlighted text
-                    st.markdown("#### Highlighted Text")
-                    st.markdown(highlight_text(text, results), unsafe_allow_html=True)
+                with st.expander(f"**{filename}** — {len(results)} PII entities found", expanded=(len(files_to_process) == 1)):
+                    if results:
+                        # Highlighted text
+                        st.markdown("#### Highlighted Text")
+                        st.markdown(highlight_text(text, results), unsafe_allow_html=True)
 
-                    # Results table
-                    st.markdown("#### Detected Entities")
-                    records = results_to_records(results, text)
-                    df = pd.DataFrame(records)
-                    st.dataframe(df, use_container_width=True)
+                        # Results table
+                        st.markdown("#### Detected Entities")
+                        records = results_to_records(results, text)
+                        df = pd.DataFrame(records)
+                        st.dataframe(df, use_container_width=True)
 
-                    for rec in records:
-                        rec["File"] = filename
-                    all_records.extend(records)
-                else:
-                    st.success("No PII entities detected.")
+                        for rec in records:
+                            rec["File"] = filename
+                        all_records.extend(records)
+                    else:
+                        st.success("No PII entities detected.")
+            except Exception as e:
+                st.error(f"**{filename}** — Error: {e}")
 
             progress_bar.progress((idx + 1) / total)
 
