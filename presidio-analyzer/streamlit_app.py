@@ -431,9 +431,16 @@ if files_to_process:
         all_records = []
         progress_bar = st.progress(0)
         status_text = st.empty()
+        stop_pressed = st.button("Stop", type="secondary")
         total = len(files_to_process)
+        stopped = False
 
         for idx, (filename, file_bytes) in enumerate(files_to_process.items()):
+            if stop_pressed:
+                stopped = True
+                st.warning(f"Stopped after processing {idx} of {total} files.")
+                break
+
             status_text.markdown(f"**Processing:** `{filename}` ({idx + 1}/{total})")
 
             try:
@@ -473,9 +480,13 @@ if files_to_process:
 
         # Summary
         st.divider()
-        st.subheader("Summary")
+        if stopped:
+            st.subheader("Partial Results (stopped)")
+        else:
+            st.subheader("Summary")
         col1, col2 = st.columns(2)
-        col1.metric("Files scanned", total)
+        files_processed = idx + 1 if not stopped else idx
+        col1.metric("Files scanned", f"{files_processed}/{total}")
         col2.metric("Total PII entities found", len(all_records))
 
         if all_records:
