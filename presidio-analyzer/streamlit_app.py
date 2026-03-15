@@ -42,6 +42,17 @@ def _load_excluded_filenames() -> Set[str]:
 EXCLUDED_FILENAMES = _load_excluded_filenames()
 
 
+def _load_excluded_folders() -> Set[str]:
+    """Load excluded folder names from .env."""
+    env_val = os.getenv("EXCLUDED_FOLDERS", "")
+    if env_val.strip():
+        return {name.strip() for name in env_val.split(",") if name.strip()}
+    return set()
+
+
+EXCLUDED_FOLDERS = _load_excluded_folders()
+
+
 st.set_page_config(
     page_title="Presidio Analyzer - Document Scanner",
     layout="wide",
@@ -298,6 +309,12 @@ def _is_supported_file(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
 
 
+def _is_in_excluded_folder(file_path: Path, root: Path) -> bool:
+    """Check if a file is inside an excluded folder."""
+    rel = file_path.relative_to(root)
+    return any(part in EXCLUDED_FOLDERS for part in rel.parts[:-1])
+
+
 def process_zip(uploaded_zip) -> Dict[str, bytes]:
     """Extract files from a zip archive."""
     files = {}
@@ -313,7 +330,7 @@ def process_zip(uploaded_zip) -> Dict[str, bytes]:
                 member_path = os.path.normpath(info.filename)
                 if member_path.startswith("..") or os.path.isabs(member_path):
                     continue
-                if _is_supported_file(info.filename):
+                if _is_supported_file(info.filename) and not any(part in EXCLUDED_FOLDERS for part in Path(info.filename).parts[:-1]):
                     files[info.filename] = zf.read(info.filename)
     return files
 
@@ -325,7 +342,7 @@ def collect_folder_files(folder_path: str) -> Dict[str, bytes]:
     if not root.is_dir():
         return files
     for file_path in sorted(root.rglob("*")):
-        if file_path.is_file() and _is_supported_file(file_path.name):
+        if file_path.is_file() and _is_supported_file(file_path.name) and not _is_in_excluded_folder(file_path, root):
             rel_path = str(file_path.relative_to(root))
             files[rel_path] = file_path.read_bytes()
     return files
