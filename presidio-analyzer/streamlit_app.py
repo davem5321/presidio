@@ -245,6 +245,9 @@ def _escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+SUPPORTED_EXTENSIONS = {".txt", ".md", ".csv", ".log", ".json", ".xml", ".html", ".yml", ".yaml", ".pdf", ".docx"}
+
+
 def process_zip(uploaded_zip) -> Dict[str, bytes]:
     """Extract files from a zip archive."""
     files = {}
@@ -261,6 +264,19 @@ def process_zip(uploaded_zip) -> Dict[str, bytes]:
                 if member_path.startswith("..") or os.path.isabs(member_path):
                     continue
                 files[info.filename] = zf.read(info.filename)
+    return files
+
+
+def collect_folder_files(folder_path: str) -> Dict[str, bytes]:
+    """Recursively collect all supported files from a folder."""
+    files = {}
+    root = Path(folder_path)
+    if not root.is_dir():
+        return files
+    for file_path in sorted(root.rglob("*")):
+        if file_path.is_file() and file_path.suffix.lower() in SUPPORTED_EXTENSIONS:
+            rel_path = str(file_path.relative_to(root))
+            files[rel_path] = file_path.read_bytes()
     return files
 
 
@@ -312,9 +328,9 @@ score_threshold = st.sidebar.slider(
 
 # ─── Main Area ─────────────────────────────────────────────
 st.title("Presidio Document Analyzer")
-st.markdown("Upload documents (PDF, Word, text files) or a `.zip` folder to scan for PII entities.")
+st.markdown("Upload documents, a zip archive, or point to a local folder to scan for PII entities.")
 
-upload_mode = st.radio("Upload mode", ["Files", "Zip archive (folder)"], horizontal=True)
+upload_mode = st.radio("Upload mode", ["Files", "Zip archive", "Local folder"], horizontal=True)
 
 if upload_mode == "Files":
     uploaded_files = st.file_uploader(
@@ -323,12 +339,19 @@ if upload_mode == "Files":
         type=["txt", "md", "csv", "log", "json", "xml", "html", "yml", "yaml", "pdf", "docx"],
         help="Upload text files, PDFs, or Word documents.",
     )
-else:
+elif upload_mode == "Zip archive":
     uploaded_zip = st.file_uploader(
         "Drop a .zip archive here",
         accept_multiple_files=False,
         type=["zip"],
         help="Upload a zip archive containing text files, PDFs, or Word documents.",
+    )
+    uploaded_files = None
+else:
+    folder_path = st.text_input(
+        "Folder path",
+        placeholder=r"C:\Users\you\Documents\contracts",
+        help="Enter the full path to a local folder. All supported files will be scanned recursively.",
     )
     uploaded_files = None
 
@@ -338,17 +361,30 @@ files_to_process: Dict[str, bytes] = {}
 if upload_mode == "Files" and uploaded_files:
     for f in uploaded_files:
         files_to_process[f.name] = f.getvalue()
-elif upload_mode == "Zip archive (folder)" and uploaded_zip is not None:
+elif upload_mode == "Zip archive" and "uploaded_zip" in dir() and uploaded_zip is not None:
     files_to_process = process_zip(uploaded_zip)
+elif upload_mode == "Local folder" and "folder_path" in dir() and folder_path:
+    resolved = Path(folder_path).resolve()
+    if resolved.is_dir():
+        files_to_process = collect_folder_files(str(resolved))
+        if not files_to_process:
+            st.warning(f"No supported files found in `{folder_path}`. Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}")
+    else:
+        st.error(f"Folder not found: `{folder_path}`")
 
 # Process
 if files_to_process:
+    if upload_mode == "Local folder":
+        st.info(f"Found **{len(files_to_process)}** supported files in `{folder_path}`")
     if st.button("Analyze", type="primary"):
         all_records = []
         progress_bar = st.progress(0)
+        status_text = st.empty()
         total = len(files_to_process)
 
         for idx, (filename, file_bytes) in enumerate(files_to_process.items()):
+            status_text.markdown(f"**Processing:** `{filename}` ({idx + 1}/{total})")
+
             text = read_file_text(file_bytes, filename)
 
             if not text.strip():
@@ -379,12 +415,14 @@ if files_to_process:
             progress_bar.progress((idx + 1) / total)
 
         progress_bar.empty()
+        status_text.empty()
 
         # Summary
         st.divider()
         st.subheader("Summary")
-        st.metric("Files scanned", total)
-        st.metric("Total PII entities found", len(all_records))
+        col1, col2 = st.columns(2)
+        col1.metric("Files scanned", total)
+        col2.metric("Total PII entities found", len(all_records))
 
         if all_records:
             summary_df = pd.DataFrame(all_records)
@@ -406,5 +444,7 @@ if files_to_process:
             )
 elif upload_mode == "Files":
     st.info("Upload files using the panel above to get started.")
-else:
+elif upload_mode == "Zip archive":
     st.info("Upload a zip archive using the panel above to get started.")
+elif upload_mode == "Local folder":
+    st.info("Enter a folder path above to get started.")
