@@ -5,16 +5,41 @@ import json
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Set
 
 import io
 
+import dotenv
 import streamlit as st
 import pandas as pd
 import fitz  # pymupdf
 from docx import Document
 from presidio_analyzer import AnalyzerEngine, RecognizerResult, PatternRecognizer, Pattern, RecognizerRegistry
 from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+dotenv.load_dotenv()
+
+
+def _load_allowed_extensions() -> Set[str]:
+    """Load allowed file extensions from .env or use defaults."""
+    env_val = os.getenv("ALLOWED_EXTENSIONS", "")
+    if env_val.strip():
+        return {ext.strip().lower() for ext in env_val.split(",") if ext.strip()}
+    return {".txt", ".md", ".csv", ".log", ".json", ".xml", ".html", ".yml", ".yaml", ".pdf", ".docx"}
+
+
+ALLOWED_EXTENSIONS = _load_allowed_extensions()
+
+
+def _load_excluded_filenames() -> Set[str]:
+    """Load excluded filenames from .env."""
+    env_val = os.getenv("EXCLUDED_FILENAMES", "")
+    if env_val.strip():
+        return {name.strip() for name in env_val.split(",") if name.strip()}
+    return set()
+
+
+EXCLUDED_FILENAMES = _load_excluded_filenames()
 
 
 st.set_page_config(
@@ -265,7 +290,12 @@ def _escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-SUPPORTED_EXTENSIONS = {".txt", ".md", ".csv", ".log", ".json", ".xml", ".html", ".yml", ".yaml", ".pdf", ".docx"}
+def _is_supported_file(filename: str) -> bool:
+    """Check if a file has an allowed extension and is not excluded."""
+    name = Path(filename).name
+    if name in EXCLUDED_FILENAMES:
+        return False
+    return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
 
 
 def process_zip(uploaded_zip) -> Dict[str, bytes]:
@@ -283,7 +313,8 @@ def process_zip(uploaded_zip) -> Dict[str, bytes]:
                 member_path = os.path.normpath(info.filename)
                 if member_path.startswith("..") or os.path.isabs(member_path):
                     continue
-                files[info.filename] = zf.read(info.filename)
+                if _is_supported_file(info.filename):
+                    files[info.filename] = zf.read(info.filename)
     return files
 
 
@@ -294,7 +325,7 @@ def collect_folder_files(folder_path: str) -> Dict[str, bytes]:
     if not root.is_dir():
         return files
     for file_path in sorted(root.rglob("*")):
-        if file_path.is_file() and file_path.suffix.lower() in SUPPORTED_EXTENSIONS:
+        if file_path.is_file() and _is_supported_file(file_path.name):
             rel_path = str(file_path.relative_to(root))
             files[rel_path] = file_path.read_bytes()
     return files
@@ -388,7 +419,7 @@ elif upload_mode == "Local folder" and "folder_path" in dir() and folder_path:
     if resolved.is_dir():
         files_to_process = collect_folder_files(str(resolved))
         if not files_to_process:
-            st.warning(f"No supported files found in `{folder_path}`. Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}")
+            st.warning(f"No supported files found in `{folder_path}`. Allowed extensions: {', '.join(sorted(ALLOWED_EXTENSIONS))}")
     else:
         st.error(f"Folder not found: `{folder_path}`")
 
