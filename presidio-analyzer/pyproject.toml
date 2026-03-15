@@ -78,6 +78,10 @@ pytest-mock = "*"
 python-dotenv = "*"
 pre_commit = "*"
 diff-cover = "*"
+streamlit = ">=1.37.0"
+pandas = ">=1.0.4,<3.0.0"
+pymupdf = "^1.27.2"
+python-docx = "^1.2.0"
 
 [tool.coverage.run]
 relative_files = true

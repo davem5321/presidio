@@ -1,0 +1,410 @@
+"""Streamlit UI for Presidio Analyzer - Document & Folder Processing."""
+
+import os
+import json
+import tempfile
+import zipfile
+from pathlib import Path
+from typing import List, Dict, Any
+
+import io
+
+import streamlit as st
+import pandas as pd
+import fitz  # pymupdf
+from docx import Document
+from presidio_analyzer import AnalyzerEngine, RecognizerResult, PatternRecognizer, Pattern, RecognizerRegistry
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+
+st.set_page_config(
+    page_title="Presidio Analyzer - Document Scanner",
+    layout="wide",
+    initial_sidebar_state="expanded",
+    menu_items={"About": "https://microsoft.github.io/presidio/"},
+)
+
+
+def _create_company_recognizer() -> PatternRecognizer:
+    """Create a pattern recognizer for company names based on common suffixes."""
+    company_patterns = [
+        Pattern(
+            name="company_suffix",
+            regex=r"\b(?:[A-Z][A-Za-z&\'\-]+(?:\s+[A-Z][A-Za-z&\'\-]+){0,4})\s+(?:Inc\.|Incorporated|Ltd\.|Limited|Corp\.|Corporation|LLC|LLP|L\.L\.C\.|PLC|plc|Co\.|GmbH|S\.A\.|N\.V\.|B\.V\.)\b",
+            score=0.7,
+        ),
+    ]
+    return PatternRecognizer(
+        supported_entity="ORGANIZATION",
+        name="CompanyNameRecognizer",
+        patterns=company_patterns,
+        supported_language="en",
+    )
+
+
+NER_MODELS = {
+    "spaCy / en_core_web_lg (fast, default)": {
+        "engine": "spacy",
+        "model": "en_core_web_lg",
+    },
+    "spaCy / en_core_web_sm (fastest, less accurate)": {
+        "engine": "spacy",
+        "model": "en_core_web_sm",
+    },
+    "HuggingFace / obi/deid_roberta_i2b2 (best for deidentification)": {
+        "engine": "transformers",
+        "model": "obi/deid_roberta_i2b2",
+    },
+    "HuggingFace / StanfordAIMI/stanford-deidentifier-base": {
+        "engine": "transformers",
+        "model": "StanfordAIMI/stanford-deidentifier-base",
+    },
+}
+
+SPACY_ENTITY_MAPPING = {
+    "PER": "PERSON",
+    "PERSON": "PERSON",
+    "NORP": "NRP",
+    "FAC": "LOCATION",
+    "LOC": "LOCATION",
+    "GPE": "LOCATION",
+    "LOCATION": "LOCATION",
+    "ORG": "ORGANIZATION",
+    "ORGANIZATION": "ORGANIZATION",
+    "DATE": "DATE_TIME",
+    "TIME": "DATE_TIME",
+}
+
+TRANSFORMERS_ENTITY_MAPPING = {
+    "PER": "PERSON",
+    "PERSON": "PERSON",
+    "LOC": "LOCATION",
+    "LOCATION": "LOCATION",
+    "GPE": "LOCATION",
+    "ORG": "ORGANIZATION",
+    "ORGANIZATION": "ORGANIZATION",
+    "NORP": "NRP",
+    "AGE": "AGE",
+    "ID": "ID",
+    "EMAIL": "EMAIL",
+    "PATIENT": "PERSON",
+    "STAFF": "PERSON",
+    "HOSP": "ORGANIZATION",
+    "PATORG": "ORGANIZATION",
+    "DATE": "DATE_TIME",
+    "TIME": "DATE_TIME",
+    "PHONE": "PHONE_NUMBER",
+    "HCW": "PERSON",
+    "HOSPITAL": "ORGANIZATION",
+    "FACILITY": "LOCATION",
+}
+
+
+@st.cache_resource
+def get_analyzer(model_key: str) -> AnalyzerEngine:
+    """Create and cache the Presidio AnalyzerEngine for a given model."""
+    model_config = NER_MODELS[model_key]
+    engine_name = model_config["engine"]
+    model_name = model_config["model"]
+
+    if engine_name == "spacy":
+        nlp_configuration = {
+            "nlp_engine_name": "spacy",
+            "models": [{"lang_code": "en", "model_name": model_name}],
+            "ner_model_configuration": {
+                "model_to_presidio_entity_mapping": SPACY_ENTITY_MAPPING,
+                "low_confidence_score_multiplier": 0.4,
+                "low_score_entity_names": ["ORG", "ORGANIZATION"],
+            },
+        }
+    else:
+        nlp_configuration = {
+            "nlp_engine_name": "transformers",
+            "models": [{
+                "lang_code": "en",
+                "model_name": {"spacy": "en_core_web_sm", "transformers": model_name},
+            }],
+            "ner_model_configuration": {
+                "model_to_presidio_entity_mapping": TRANSFORMERS_ENTITY_MAPPING,
+                "low_confidence_score_multiplier": 0.4,
+                "low_score_entity_names": ["ID"],
+                "labels_to_ignore": [
+                    "CARDINAL", "EVENT", "LANGUAGE", "LAW", "MONEY",
+                    "ORDINAL", "PERCENT", "PRODUCT", "QUANTITY", "WORK_OF_ART",
+                ],
+            },
+        }
+
+    nlp_engine = NlpEngineProvider(nlp_configuration=nlp_configuration).create_engine()
+    registry = RecognizerRegistry()
+    registry.load_predefined_recognizers(nlp_engine=nlp_engine)
+    registry.add_recognizer(_create_company_recognizer())
+
+    analyzer = AnalyzerEngine(nlp_engine=nlp_engine, registry=registry)
+    return analyzer
+
+
+def read_file_text(file_bytes: bytes, filename: str) -> str:
+    """Extract text from uploaded file bytes based on extension."""
+    ext = Path(filename).suffix.lower()
+    if ext == ".pdf":
+        return _extract_pdf_text(file_bytes)
+    elif ext == ".docx":
+        return _extract_docx_text(file_bytes)
+    else:
+        return file_bytes.decode("utf-8", errors="replace")
+
+
+def _extract_pdf_text(file_bytes: bytes) -> str:
+    """Extract text from PDF bytes using pymupdf."""
+    text_parts = []
+    with fitz.open(stream=file_bytes, filetype="pdf") as doc:
+        for page in doc:
+            text_parts.append(page.get_text())
+    return "\n".join(text_parts)
+
+
+def _extract_docx_text(file_bytes: bytes) -> str:
+    """Extract text from DOCX bytes using python-docx."""
+    doc = Document(io.BytesIO(file_bytes))
+    return "\n".join(paragraph.text for paragraph in doc.paragraphs)
+
+
+def analyze_text(text: str, language: str, entities: List[str], score_threshold: float, model_key: str = "") -> List[RecognizerResult]:
+    """Run Presidio Analyzer on text."""
+    analyzer = get_analyzer(model_key)
+    results = analyzer.analyze(
+        text=text,
+        language=language,
+        entities=entities if entities else None,
+        score_threshold=score_threshold,
+    )
+    return results
+
+
+def results_to_records(results: List[RecognizerResult], text: str) -> List[Dict[str, Any]]:
+    """Convert analyzer results to a list of dicts for display."""
+    records = []
+    for r in results:
+        records.append({
+            "Entity Type": r.entity_type,
+            "Text": text[r.start:r.end],
+            "Start": r.start,
+            "End": r.end,
+            "Score": round(r.score, 2),
+        })
+    return records
+
+
+def highlight_text(text: str, results: List[RecognizerResult]) -> str:
+    """Create an HTML string with PII entities highlighted."""
+    if not results:
+        return f"<pre style='white-space: pre-wrap;'>{text}</pre>"
+
+    sorted_results = sorted(results, key=lambda x: x.start)
+    html_parts = []
+    last_end = 0
+
+    colors = {
+        "PERSON": "#ff6b6b",
+        "EMAIL_ADDRESS": "#ffa94d",
+        "PHONE_NUMBER": "#69db7c",
+        "LOCATION": "#74c0fc",
+        "DATE_TIME": "#b197fc",
+        "CREDIT_CARD": "#ff8787",
+        "CRYPTO": "#ffd43b",
+        "IBAN_CODE": "#a9e34b",
+        "IP_ADDRESS": "#66d9e8",
+        "NRP": "#e599f7",
+        "MEDICAL_LICENSE": "#ff922b",
+        "URL": "#20c997",
+        "ORGANIZATION": "#da77f2",
+    }
+    default_color = "#ffc9c9"
+
+    for r in sorted_results:
+        if r.start > last_end:
+            html_parts.append(_escape_html(text[last_end:r.start]))
+        color = colors.get(r.entity_type, default_color)
+        entity_text = _escape_html(text[r.start:r.end])
+        html_parts.append(
+            f'<mark style="background-color: {color}; padding: 2px 4px; border-radius: 3px;" '
+            f'title="{r.entity_type} ({r.score:.2f})">'
+            f'{entity_text} <sup style="font-size: 0.7em;">{r.entity_type}</sup></mark>'
+        )
+        last_end = r.end
+
+    if last_end < len(text):
+        html_parts.append(_escape_html(text[last_end:]))
+
+    return f"<div style='white-space: pre-wrap; font-family: monospace; line-height: 1.6;'>{''.join(html_parts)}</div>"
+
+
+def _escape_html(text: str) -> str:
+    """Escape HTML special characters."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def process_zip(uploaded_zip) -> Dict[str, bytes]:
+    """Extract files from a zip archive."""
+    files = {}
+    with tempfile.TemporaryDirectory() as tmpdir:
+        zip_path = os.path.join(tmpdir, "upload.zip")
+        with open(zip_path, "wb") as f:
+            f.write(uploaded_zip.getvalue())
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            # Guard against zip slip
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                member_path = os.path.normpath(info.filename)
+                if member_path.startswith("..") or os.path.isabs(member_path):
+                    continue
+                files[info.filename] = zf.read(info.filename)
+    return files
+
+
+# ─── Sidebar ───────────────────────────────────────────────
+st.sidebar.header("Presidio Analyzer")
+st.sidebar.markdown("Scan documents for PII entities using [Microsoft Presidio](https://microsoft.github.io/presidio/).")
+
+st_model_key = st.sidebar.selectbox(
+    "NER model",
+    options=list(NER_MODELS.keys()),
+    index=0,
+    help="Select the Named Entity Recognition model. Transformer models are more accurate but slower and require downloading from HuggingFace on first use.",
+)
+
+language = st.sidebar.selectbox("Language", ["en"], index=0)
+
+with st.sidebar.expander("Model info"):
+    cfg = NER_MODELS[st_model_key]
+    st.write(f"**Engine:** {cfg['engine']}")
+    st.write(f"**Model:** {cfg['model']}")
+    if cfg["engine"] == "transformers":
+        st.info("Transformer models download on first use (~500MB-1GB). First analysis will be slower.")
+
+analyzer = get_analyzer(st_model_key)
+all_entities = sorted(analyzer.get_supported_entities())
+
+selected_entities = st.sidebar.multiselect(
+    "Entities to detect",
+    options=["All"] + all_entities,
+    default=["All"],
+    help="Select which PII entity types to scan for.",
+)
+
+if "All" in selected_entities or not selected_entities:
+    entities_to_use = None  # Analyzer will use all
+    entities_list = []
+else:
+    entities_to_use = selected_entities
+    entities_list = selected_entities
+
+score_threshold = st.sidebar.slider(
+    "Confidence threshold",
+    min_value=0.0,
+    max_value=1.0,
+    value=0.35,
+    step=0.05,
+    help="Minimum confidence score for a detection to be included.",
+)
+
+# ─── Main Area ─────────────────────────────────────────────
+st.title("Presidio Document Analyzer")
+st.markdown("Upload documents (PDF, Word, text files) or a `.zip` folder to scan for PII entities.")
+
+upload_mode = st.radio("Upload mode", ["Files", "Zip archive (folder)"], horizontal=True)
+
+if upload_mode == "Files":
+    uploaded_files = st.file_uploader(
+        "Drop files here",
+        accept_multiple_files=True,
+        type=["txt", "md", "csv", "log", "json", "xml", "html", "yml", "yaml", "pdf", "docx"],
+        help="Upload text files, PDFs, or Word documents.",
+    )
+else:
+    uploaded_zip = st.file_uploader(
+        "Drop a .zip archive here",
+        accept_multiple_files=False,
+        type=["zip"],
+        help="Upload a zip archive containing text files, PDFs, or Word documents.",
+    )
+    uploaded_files = None
+
+# Collect files to process
+files_to_process: Dict[str, bytes] = {}
+
+if upload_mode == "Files" and uploaded_files:
+    for f in uploaded_files:
+        files_to_process[f.name] = f.getvalue()
+elif upload_mode == "Zip archive (folder)" and uploaded_zip is not None:
+    files_to_process = process_zip(uploaded_zip)
+
+# Process
+if files_to_process:
+    if st.button("Analyze", type="primary"):
+        all_records = []
+        progress_bar = st.progress(0)
+        total = len(files_to_process)
+
+        for idx, (filename, file_bytes) in enumerate(files_to_process.items()):
+            text = read_file_text(file_bytes, filename)
+
+            if not text.strip():
+                st.warning(f"**{filename}** is empty, skipping.")
+                progress_bar.progress((idx + 1) / total)
+                continue
+
+            results = analyze_text(text, language, entities_list, score_threshold, st_model_key)
+
+            with st.expander(f"**{filename}** — {len(results)} PII entities found", expanded=(len(files_to_process) == 1)):
+                if results:
+                    # Highlighted text
+                    st.markdown("#### Highlighted Text")
+                    st.markdown(highlight_text(text, results), unsafe_allow_html=True)
+
+                    # Results table
+                    st.markdown("#### Detected Entities")
+                    records = results_to_records(results, text)
+                    df = pd.DataFrame(records)
+                    st.dataframe(df, use_container_width=True)
+
+                    for rec in records:
+                        rec["File"] = filename
+                    all_records.extend(records)
+                else:
+                    st.success("No PII entities detected.")
+
+            progress_bar.progress((idx + 1) / total)
+
+        progress_bar.empty()
+
+        # Summary
+        st.divider()
+        st.subheader("Summary")
+        st.metric("Files scanned", total)
+        st.metric("Total PII entities found", len(all_records))
+
+        if all_records:
+            summary_df = pd.DataFrame(all_records)
+            st.markdown("#### All Detections")
+            st.dataframe(summary_df, use_container_width=True)
+
+            # Entity type breakdown
+            st.markdown("#### By Entity Type")
+            type_counts = summary_df["Entity Type"].value_counts()
+            st.bar_chart(type_counts)
+
+            # Download results as JSON
+            json_str = json.dumps(all_records, indent=2)
+            st.download_button(
+                label="Download results as JSON",
+                data=json_str,
+                file_name="presidio_analysis_results.json",
+                mime="application/json",
+            )
+elif upload_mode == "Files":
+    st.info("Upload files using the panel above to get started.")
+else:
+    st.info("Upload a zip archive using the panel above to get started.")
