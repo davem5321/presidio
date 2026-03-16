@@ -83,6 +83,10 @@ NER_MODELS = {
         "engine": "spacy",
         "model": "en_core_web_lg",
     },
+    "spaCy / en_core_web_trf (transformer-based, most accurate)": {
+        "engine": "spacy",
+        "model": "en_core_web_trf",
+    },
     "spaCy / en_core_web_sm (fastest, less accurate)": {
         "engine": "spacy",
         "model": "en_core_web_sm",
