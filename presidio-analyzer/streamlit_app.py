@@ -147,6 +147,13 @@ def get_analyzer(model_key: str) -> AnalyzerEngine:
     engine_name = model_config["engine"]
     model_name = model_config["model"]
 
+    # en_core_web_trf requires the curated transformers plugin to be loaded
+    if model_name == "en_core_web_trf":
+        try:
+            import spacy_curated_transformers  # noqa: F401
+        except ImportError:
+            pass
+
     if engine_name == "spacy":
         nlp_configuration = {
             "nlp_engine_name": "spacy",
@@ -489,7 +496,7 @@ if files_to_process:
                         st.markdown("#### Detected Entities")
                         records = results_to_records(results, text)
                         df = pd.DataFrame(records)
-                        st.dataframe(df, use_container_width=True)
+                        st.dataframe(df, width="stretch")
 
                         for rec in records:
                             rec["File"] = filename
@@ -518,7 +525,7 @@ if files_to_process:
         if all_records:
             summary_df = pd.DataFrame(all_records)
             st.markdown("#### All Detections")
-            st.dataframe(summary_df, use_container_width=True)
+            st.dataframe(summary_df, width="stretch")
 
             # Entity type breakdown
             st.markdown("#### By Entity Type")
